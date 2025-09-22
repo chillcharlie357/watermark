@@ -23,24 +23,24 @@ def get_exif_date(image_path):
                         # 解析日期字符串 (格式: YYYY:MM:DD HH:MM:SS)
                         try:
                             date_obj = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
-                            return date_obj.strftime("%Y年%m月%d日")
+                            return date_obj.strftime("%B %d, %Y")
                         except ValueError:
                             continue
             
             # 如果没有找到EXIF日期，使用文件修改时间
             file_time = os.path.getmtime(image_path)
             date_obj = datetime.fromtimestamp(file_time)
-            return date_obj.strftime("%Y年%m月%d日")
+            return date_obj.strftime("%B %d, %Y")
             
     except Exception as e:
-        print(f"读取 {image_path} 的EXIF信息时出错: {e}")
+        print(f"Error reading EXIF data from {image_path}: {e}")
         # 使用文件修改时间作为备选
         try:
             file_time = os.path.getmtime(image_path)
             date_obj = datetime.fromtimestamp(file_time)
-            return date_obj.strftime("%Y年%m月%d日")
+            return date_obj.strftime("%B %d, %Y")
         except:
-            return "未知日期"
+            return "Unknown Date"
 
 
 def get_position_coordinates(image_size, text_size, position):
@@ -48,22 +48,22 @@ def get_position_coordinates(image_size, text_size, position):
     img_width, img_height = image_size
     text_width, text_height = text_size
     
-    if position == "左上角":
+    if position == "top-left":
         return (10, 10)
-    elif position == "右上角":
+    elif position == "top-right":
         return (img_width - text_width - 10, 10)
-    elif position == "左下角":
+    elif position == "bottom-left":
         return (10, img_height - text_height - 10)
-    elif position == "右下角":
+    elif position == "bottom-right":
         return (img_width - text_width - 10, img_height - text_height - 10)
-    elif position == "居中":
+    elif position == "center":
         return ((img_width - text_width) // 2, (img_height - text_height) // 2)
     else:
-        # 默认左上角
-        return (10, 10)
+        # 默认右下角
+        return (img_width - text_width - 10, img_height - text_height - 10)
 
 
-def add_watermark(image_path, output_path, watermark_text, font_size=24, color="white", position="右下角"):
+def add_watermark(image_path, output_path, watermark_text, font_size=24, color="white", position="bottom-right"):
     """为图片添加水印"""
     try:
         # 打开图片
@@ -97,17 +97,17 @@ def add_watermark(image_path, output_path, watermark_text, font_size=24, color="
             
             # 保存图片
             image.save(output_path, "JPEG", quality=95)
-            print(f"已保存水印图片: {output_path}")
+            print(f"Saved watermarked image: {output_path}")
             
     except Exception as e:
-        print(f"处理图片 {image_path} 时出错: {e}")
+        print(f"Error processing image {image_path}: {e}")
 
 
-def process_images(input_path, font_size=24, color="white", position="右下角"):
+def process_images(input_path, font_size=24, color="white", position="bottom-right"):
     """处理指定路径下的所有图片"""
     # 检查输入路径是否存在
     if not os.path.exists(input_path):
-        print(f"错误: 路径 {input_path} 不存在")
+        print(f"Error: Path {input_path} does not exist")
         return
     
     # 支持的图片格式
@@ -120,7 +120,7 @@ def process_images(input_path, font_size=24, color="white", position="右下角"
         image_files.extend(glob.glob(os.path.join(input_path, ext.upper())))
     
     if not image_files:
-        print(f"在 {input_path} 中没有找到图片文件")
+        print(f"No image files found in {input_path}")
         return
     
     # 创建输出目录
@@ -130,7 +130,7 @@ def process_images(input_path, font_size=24, color="white", position="右下角"
     
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-        print(f"创建输出目录: {output_dir}")
+        print(f"Created output directory: {output_dir}")
     
     # 处理每张图片
     for image_file in image_files:
@@ -143,32 +143,32 @@ def process_images(input_path, font_size=24, color="white", position="右下角"
         output_filename = f"{name}_watermark.jpg"
         output_path = os.path.join(output_dir, output_filename)
         
-        print(f"处理图片: {filename} -> 水印: {watermark_text}")
+        print(f"Processing image: {filename} -> Watermark: {watermark_text}")
         add_watermark(image_file, output_path, watermark_text, font_size, color, position)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="图片水印添加工具")
-    parser.add_argument("path", help="图片文件路径或包含图片的目录路径")
-    parser.add_argument("-s", "--size", type=int, default=24, help="字体大小 (默认: 24)")
-    parser.add_argument("-c", "--color", default="white", help="水印颜色 (默认: white)")
+    parser = argparse.ArgumentParser(description="Image Watermark Tool")
+    parser.add_argument("path", help="Image file path or directory path containing images")
+    parser.add_argument("-s", "--size", type=int, default=24, help="Font size (default: 24)")
+    parser.add_argument("-c", "--color", default="white", help="Watermark color (default: white)")
     parser.add_argument("-p", "--position", 
-                       choices=["左上角", "右上角", "左下角", "右下角", "居中"],
-                       default="右下角", 
-                       help="水印位置 (默认: 右下角)")
+                       choices=["top-left", "top-right", "bottom-left", "bottom-right", "center"],
+                       default="bottom-right", 
+                       help="Watermark position (default: bottom-right)")
     
     args = parser.parse_args()
     
-    print("=== 图片水印添加工具 ===")
-    print(f"输入路径: {args.path}")
-    print(f"字体大小: {args.size}")
-    print(f"水印颜色: {args.color}")
-    print(f"水印位置: {args.position}")
+    print("=== Image Watermark Tool ===")
+    print(f"Input path: {args.path}")
+    print(f"Font size: {args.size}")
+    print(f"Watermark color: {args.color}")
+    print(f"Watermark position: {args.position}")
     print("-" * 30)
     
     process_images(args.path, args.size, args.color, args.position)
     
-    print("处理完成!")
+    print("Processing completed!")
 
 
 if __name__ == "__main__":
