@@ -1,7 +1,13 @@
 [project]
 name = "watermark"
 version = "0.1.0"
-description = "Watermark"
+description = "图片水印添加工具"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "Pillow>=10.0.0",
+    "argparse"
+]
+
+[project.scripts]
+watermark = "main:main"
