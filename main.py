@@ -772,8 +772,8 @@ class MainWindow(QMainWindow):
 
     def _save_template(self):
         import json
-        # 通过文件管理器选择保存位置
-        default_path = getattr(self, "_current_template_path", None) or os.path.join(os.getcwd(), "watermark_template.json")
+        # 通过文件管理器选择保存位置（默认用户目录）
+        default_path = os.path.join(self._user_data_dir(), "watermark_template.json")
         path, _ = QFileDialog.getSaveFileName(self, "保存模板", default_path, "JSON (*.json)")
         if not path:
             return
@@ -822,6 +822,13 @@ class MainWindow(QMainWindow):
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self._apply_settings_dict(data)
+            # 同步到用户目录默认模板
+            try:
+                user_tpl = os.path.join(self._user_data_dir(), "watermark_template.json")
+                with open(user_tpl, "w", encoding="utf-8") as uf:
+                    json.dump(data, uf, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
             self._current_template_path = path
             self._update_template_label()
             QMessageBox.information(self, "提示", "模板已加载")
