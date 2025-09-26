@@ -6,8 +6,14 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "Pillow>=10.0.0",
-    "argparse"
+    "PyQt6>=6.6"
 ]
 
 [project.scripts]
 watermark = "main:main"
+watermark-gui = "main:gui_main"
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.16.0",
+]
