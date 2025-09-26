@@ -354,6 +354,8 @@ class MainWindow(QMainWindow):
         self.output_dir: Optional[str] = None
         self._dragging = False
         self._drag_offset = QPoint(0, 0)
+        # 显示/记录当前模板路径
+        self._current_template_path: Optional[str] = None
 
         self._init_ui()
         self.setAcceptDrops(True)
@@ -487,6 +489,9 @@ class MainWindow(QMainWindow):
         # 模板管理
         grp_tpl = QGroupBox("模板与设置")
         vb_tpl = QVBoxLayout(grp_tpl)
+        # 当前模板名显示
+        self.lbl_tpl_name = QLabel("当前模板：未选择")
+        vb_tpl.addWidget(self.lbl_tpl_name)
         self.btn_save_tpl = QPushButton("保存模板")
         self.btn_save_tpl.clicked.connect(self._save_template)
         self.btn_load_tpl = QPushButton("加载模板")
@@ -713,41 +718,127 @@ class MainWindow(QMainWindow):
         if self._dragging and e.button() == Qt.MouseButton.LeftButton:
             self._dragging = False
 
-    # 模板（单一职责：保存/加载设置）
+    # 关闭时自动保存上次设置（单一职责：持久化当前会话）
+    def closeEvent(self, e):
+        try:
+            self._save_last_session()
+        except Exception:
+            pass
+        super().closeEvent(e)
+
+    # 用户数据目录（单一职责：提供平台兼容路径）
+    def _user_data_dir(self) -> str:
+        base = os.environ.get("APPDATA")
+        if base:
+            path = os.path.join(base, "WatermarkTool")
+        else:
+            path = os.path.join(os.path.expanduser("~"), ".watermark_tool")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    # 保存/加载上次会话（单一职责：读写 last_settings.json）
+    def _save_last_session(self):
+        import json
+        data = {
+            "settings": self._settings_to_dict(),
+            "template_path": self._current_template_path,
+        }
+        path = os.path.join(self._user_data_dir(), "last_settings.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _load_last_session(self) -> bool:
+        import json
+        path = os.path.join(self._user_data_dir(), "last_settings.json")
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # 兼容两种结构：包含 settings 键或直接是设置字典
+            settings_dict = data.get("settings", data)
+            self._apply_settings_dict(settings_dict)
+            self._current_template_path = data.get("template_path")
+            self._update_template_label()
+            self._update_preview()
+            return True
+        except Exception:
+            return False
+
+    # 模板（单一职责：保存/加载/删除模板）
+    def _update_template_label(self):
+        name = os.path.basename(self._current_template_path) if getattr(self, "_current_template_path", None) else "未选择"
+        self.lbl_tpl_name.setText(f"当前模板：{name}")
+
     def _save_template(self):
         import json
-        tpl_path = os.path.join(os.getcwd(), "watermark_template.json")
+        # 通过文件管理器选择保存位置
+        default_path = getattr(self, "_current_template_path", None) or os.path.join(os.getcwd(), "watermark_template.json")
+        path, _ = QFileDialog.getSaveFileName(self, "保存模板", default_path, "JSON (*.json)")
+        if not path:
+            return
         try:
-            with open(tpl_path, "w", encoding="utf-8") as f:
-                json.dump(self._settings_to_dict(), f, ensure_ascii=False, indent=2)
-            QMessageBox.information(self, "提示", f"模板已保存: {tpl_path}")
+            settings_data = self._settings_to_dict()
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(settings_data, f, ensure_ascii=False, indent=2)
+            # 同步到用户目录默认模板
+            user_tpl = os.path.join(self._user_data_dir(), "watermark_template.json")
+            try:
+                with open(user_tpl, "w", encoding="utf-8") as uf:
+                    json.dump(settings_data, uf, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            self._current_template_path = path
+            self._update_template_label()
+            QMessageBox.information(self, "提示", f"模板已保存: {path}")
         except Exception as e:
             QMessageBox.warning(self, "错误", f"保存模板失败: {e}")
 
     def _load_template(self, silent: bool = False):
         import json
-        tpl_path = os.path.join(os.getcwd(), "watermark_template.json")
-        if not os.path.exists(tpl_path):
-            if not silent:
-                QMessageBox.information(self, "提示", "未找到模板文件")
+        if silent:
+            # 启动时静默加载用户目录中的默认模板路径
+            user_tpl = os.path.join(self._user_data_dir(), "watermark_template.json")
+            tpl_path = user_tpl if os.path.exists(user_tpl) else (getattr(self, "_current_template_path", None) or os.path.join(os.getcwd(), "watermark_template.json"))
+            if not os.path.exists(tpl_path):
+                return
+            try:
+                with open(tpl_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._apply_settings_dict(data)
+                self._current_template_path = tpl_path
+                self._update_template_label()
+                self._update_preview()
+            except Exception:
+                # 静默模式下仅忽略错误
+                pass
+            return
+        # 非静默：通过文件管理器选择模板文件
+        init_dir = getattr(self, "_current_template_path", None) or os.getcwd()
+        path, _ = QFileDialog.getOpenFileName(self, "加载模板", init_dir, "JSON (*.json)")
+        if not path:
             return
         try:
-            with open(tpl_path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self._apply_settings_dict(data)
-            if not silent:
-                QMessageBox.information(self, "提示", "模板已加载")
+            self._current_template_path = path
+            self._update_template_label()
+            QMessageBox.information(self, "提示", "模板已加载")
             self._update_preview()
         except Exception as e:
-            if not silent:
-                QMessageBox.warning(self, "错误", f"加载模板失败: {e}")
+            QMessageBox.warning(self, "错误", f"加载模板失败: {e}")
 
     def _delete_template(self):
-        tpl_path = os.path.join(os.getcwd(), "watermark_template.json")
+        # 优先删除当前选择的模板文件，其次回退到默认模板路径
+        path = getattr(self, "_current_template_path", None) or os.path.join(os.getcwd(), "watermark_template.json")
         try:
-            if os.path.exists(tpl_path):
-                os.remove(tpl_path)
+            if path and os.path.exists(path):
+                os.remove(path)
                 QMessageBox.information(self, "提示", "模板已删除")
+                # 清空当前模板并更新显示
+                self._current_template_path = None
+                self._update_template_label()
             else:
                 QMessageBox.information(self, "提示", "模板文件不存在")
         except Exception as e:
@@ -853,10 +944,13 @@ def gui_main():
     import sys
     app = QApplication(sys.argv)
     win = MainWindow()
-    # 尝试自动加载上次模板（静默模式）
+    # 启动时优先加载上次关闭时的设置，其次回退到默认模板
     try:
-        win._load_template(silent=True)
+        loaded = win._load_last_session()
+        if not loaded:
+            win._load_template(silent=True)
     except Exception:
+        # 若发生异常，继续展示空白界面
         pass
     win.show()
     sys.exit(app.exec())
