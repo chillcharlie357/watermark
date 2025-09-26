@@ -13,7 +13,7 @@ try:
     from PyQt6.QtWidgets import (
         QMainWindow, QApplication, QWidget, QHBoxLayout, QVBoxLayout,
         QListWidget, QListWidgetItem, QPushButton, QCheckBox, QLineEdit,
-        QSpinBox, QSlider, QGroupBox, QLabel, QComboBox, QFileDialog,
+        QSpinBox, QSlider, QGroupBox, QLabel, QComboBox, QFileDialog, QScrollArea,
         QMessageBox, QColorDialog
     )
     from PyQt6.QtGui import QImage, QPixmap, QIcon
@@ -505,7 +505,13 @@ class MainWindow(QMainWindow):
         right_box.addWidget(self.btn_export)
         right_box.addStretch(1)
 
-        layout.addLayout(right_box, 4)
+        # 使用滚动区域包裹右侧控制面板，提供垂直滚动条
+        right_panel = QWidget()
+        right_panel.setLayout(right_box)
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setWidget(right_panel)
+        layout.addWidget(right_scroll, 4)
 
     # 文件导入相关（单一职责：管理图片列表）
     def _add_files(self):
