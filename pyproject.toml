@@ -12,6 +12,7 @@ dependencies = [
 [project.scripts]
 watermark = "main:main"
 watermark-gui = "main:gui_main"
+pack = "pack:main"
 
 [dependency-groups]
 dev = [

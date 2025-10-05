@@ -46,16 +46,19 @@ uv run python main.py <path> -s <font_size> -c <color> -p <position>
 ### Examples
 
 1. **Process a single image file**:
+
    ```bash
    uv run python main.py photo.jpg
    ```
 
 2. **Process entire directory**:
+
    ```bash
    uv run python main.py /path/to/photos/
    ```
 
 3. **Custom watermark style**:
+
    ```bash
    uv run python main.py photos/ -s 32 -c red -p top-left
    ```
