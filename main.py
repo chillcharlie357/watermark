@@ -427,7 +427,9 @@ class MainWindow(QMainWindow):
         vb_text = QVBoxLayout(grp_text)
         self.chk_text_enable = QCheckBox("启用文本水印")
         self.chk_text_enable.setChecked(self.settings.text_enabled)
-        self.chk_text_enable.stateChanged.connect(lambda _: self._update_preview())
+        self.chk_text_enable.stateChanged.connect(lambda _: self._on_text_enable_toggled())
+        self.btn_del_text = QPushButton("删除文本水印")
+        self.btn_del_text.clicked.connect(self._delete_text)
         self.txt_input = QLineEdit(self.settings.text)
         self.txt_input.textChanged.connect(self._on_text_changed)
         self.sp_font = QSpinBox(); self.sp_font.setRange(8, 300); self.sp_font.setValue(self.settings.font_size)
@@ -440,6 +442,7 @@ class MainWindow(QMainWindow):
         self.chk_stroke.stateChanged.connect(lambda _: self._on_stroke_toggle())
         self.sp_stroke = QSpinBox(); self.sp_stroke.setRange(0, 10); self.sp_stroke.setValue(self.settings.stroke_width); self.sp_stroke.valueChanged.connect(self._on_stroke_width_changed)
         vb_text.addWidget(self.chk_text_enable)
+        vb_text.addWidget(self.btn_del_text)
         vb_text.addWidget(QLabel("文本内容")); vb_text.addWidget(self.txt_input)
         vb_text.addWidget(QLabel("字号")); vb_text.addWidget(self.sp_font)
         vb_text.addWidget(self.btn_color)
@@ -452,15 +455,18 @@ class MainWindow(QMainWindow):
         vb_img = QVBoxLayout(grp_img)
         self.chk_img_enable = QCheckBox("启用图片水印")
         self.chk_img_enable.setChecked(self.settings.image_enabled)
-        self.chk_img_enable.stateChanged.connect(lambda _: self._update_preview())
+        self.chk_img_enable.stateChanged.connect(lambda _: self._on_img_enable_toggled())
         self.btn_choose_img = QPushButton("选择 PNG")
         self.btn_choose_img.clicked.connect(self._choose_image)
+        self.btn_del_img = QPushButton("删除图片水印")
+        self.btn_del_img.clicked.connect(self._delete_image)
         self.sp_img_scale = QSpinBox(); self.sp_img_scale.setRange(1, 500); self.sp_img_scale.setValue(self.settings.image_scale_percent)
         self.sp_img_scale.valueChanged.connect(self._on_img_scale_changed)
         self.slider_img_alpha = QSlider(Qt.Orientation.Horizontal); self.slider_img_alpha.setRange(0, 255); self.slider_img_alpha.setValue(self.settings.image_alpha)
         self.slider_img_alpha.valueChanged.connect(self._on_img_alpha_changed)
         vb_img.addWidget(self.chk_img_enable)
         vb_img.addWidget(self.btn_choose_img)
+        vb_img.addWidget(self.btn_del_img)
         vb_img.addWidget(QLabel("缩放(%)")); vb_img.addWidget(self.sp_img_scale)
         vb_img.addWidget(QLabel("不透明度")); vb_img.addWidget(self.slider_img_alpha)
         right_box.addWidget(grp_img)
@@ -483,12 +489,13 @@ class MainWindow(QMainWindow):
         self.sp_resize = QSpinBox(); self.sp_resize.setRange(1, 500); self.sp_resize.setValue(self.settings.resize_percent or 100)
         self.chk_resize = QCheckBox("按百分比缩放原图")
         self.chk_resize.stateChanged.connect(lambda _: self._toggle_resize())
+        self.lbl_quality = QLabel("JPEG质量")
         vb_out.addWidget(self.btn_choose_out)
         vb_out.addWidget(QLabel("输出格式")); vb_out.addWidget(self.cmb_format)
         vb_out.addWidget(QLabel("命名规则")); vb_out.addWidget(self.cmb_naming)
         vb_out.addWidget(QLabel("前缀")); vb_out.addWidget(self.ed_prefix)
         vb_out.addWidget(QLabel("后缀")); vb_out.addWidget(self.ed_suffix)
-        vb_out.addWidget(QLabel("JPEG质量")); vb_out.addWidget(self.slider_quality)
+        vb_out.addWidget(self.lbl_quality); vb_out.addWidget(self.slider_quality)
         vb_out.addWidget(self.chk_resize); vb_out.addWidget(QLabel("缩放(%)")); vb_out.addWidget(self.sp_resize)
         right_box.addWidget(grp_out)
 
@@ -523,6 +530,12 @@ class MainWindow(QMainWindow):
         right_scroll.setWidgetResizable(True)
         right_scroll.setWidget(right_panel)
         layout.addWidget(right_scroll, 4)
+
+        # 初始状态：根据启用开关禁用相关控件、根据格式隐藏质量控件、根据缩放选项禁用输入
+        self._update_text_controls_enabled()
+        self._update_img_controls_enabled()
+        self._update_output_format_controls()
+        self.sp_resize.setEnabled(self.chk_resize.isChecked())
 
     # 文件导入相关（单一职责：管理图片列表）
     def _add_files(self):
@@ -659,6 +672,11 @@ class MainWindow(QMainWindow):
         self.settings.stroke_width = v
         self._update_preview()
 
+    def _on_text_enable_toggled(self):
+        self.settings.text_enabled = self.chk_text_enable.isChecked()
+        self._update_text_controls_enabled()
+        self._update_preview()
+
     # 图片水印设置回调
     def _choose_image(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择水印图片", "", "PNG Images (*.png)")
@@ -667,6 +685,11 @@ class MainWindow(QMainWindow):
             self.settings.image_enabled = True
             self.chk_img_enable.setChecked(True)
             self._update_preview()
+
+    def _on_img_enable_toggled(self):
+        self.settings.image_enabled = self.chk_img_enable.isChecked()
+        self._update_img_controls_enabled()
+        self._update_preview()
 
     def _on_img_scale_changed(self, v: int):
         self.settings.image_scale_percent = v
@@ -684,6 +707,8 @@ class MainWindow(QMainWindow):
 
     def _set_output_format(self, v: str):
         self.settings.output_format = v
+        self._update_output_format_controls()
+        self._update_preview()
 
     def _set_naming_rule(self, v: str):
         self.settings.naming_rule = v
@@ -702,6 +727,7 @@ class MainWindow(QMainWindow):
             self.settings.resize_percent = self.sp_resize.value()
         else:
             self.settings.resize_percent = None
+        self.sp_resize.setEnabled(self.chk_resize.isChecked())
         self._update_preview()
 
     # 预览区拖拽定位（单一职责：处理手动拖拽）
@@ -766,6 +792,8 @@ class MainWindow(QMainWindow):
             self._apply_settings_dict(settings_dict)
             self._current_template_path = data.get("template_path")
             self._update_template_label()
+            # 同步控件显示与使能
+            self._sync_controls_from_settings()
             self._update_preview()
             return True
         except Exception:
@@ -906,6 +934,67 @@ class MainWindow(QMainWindow):
         s.suffix = d.get("suffix", s.suffix)
         s.jpeg_quality = d.get("jpeg_quality", s.jpeg_quality)
         s.resize_percent = d.get("resize_percent", s.resize_percent)
+
+    # 同步控件状态到当前设置（用于加载会话/模板后）
+    def _sync_controls_from_settings(self):
+        s = self.settings
+        # 文本水印
+        self.chk_text_enable.setChecked(s.text_enabled)
+        self.txt_input.setText(s.text)
+        self.sp_font.setValue(s.font_size)
+        self.slider_alpha.setValue(s.text_alpha)
+        self.chk_stroke.setChecked(s.stroke_enabled)
+        self.sp_stroke.setValue(s.stroke_width)
+        # 图片水印
+        self.chk_img_enable.setChecked(s.image_enabled)
+        self.sp_img_scale.setValue(s.image_scale_percent)
+        self.slider_img_alpha.setValue(s.image_alpha)
+        # 导出设置
+        self.cmb_format.setCurrentText(s.output_format)
+        self.cmb_naming.setCurrentText(s.naming_rule)
+        self.ed_prefix.setText(s.prefix)
+        self.ed_suffix.setText(s.suffix)
+        self.slider_quality.setValue(s.jpeg_quality)
+        self.chk_resize.setChecked(s.resize_percent is not None)
+        self.sp_resize.setValue(s.resize_percent or self.sp_resize.value())
+        # 可见性/使能联动
+        self._update_text_controls_enabled()
+        self._update_img_controls_enabled()
+        self._update_output_format_controls()
+        self.sp_resize.setEnabled(self.chk_resize.isChecked())
+
+    # 根据启用开关禁用/启用文本水印相关控件
+    def _update_text_controls_enabled(self):
+        enabled = self.chk_text_enable.isChecked()
+        for w in [self.txt_input, self.sp_font, self.btn_color, self.slider_alpha, self.chk_stroke, self.sp_stroke]:
+            w.setEnabled(enabled)
+
+    # 根据启用开关禁用/启用图片水印相关控件
+    def _update_img_controls_enabled(self):
+        enabled = self.chk_img_enable.isChecked()
+        for w in [self.btn_choose_img, self.sp_img_scale, self.slider_img_alpha]:
+            w.setEnabled(enabled)
+
+    # 根据输出格式隐藏/显示 JPEG 质量控件
+    def _update_output_format_controls(self):
+        is_jpeg = (self.cmb_format.currentText() == "JPEG")
+        self.lbl_quality.setVisible(is_jpeg)
+        self.slider_quality.setVisible(is_jpeg)
+
+    # 删除文本水印内容并禁用
+    def _delete_text(self):
+        self.settings.text = ""
+        self.txt_input.setText("")
+        self.settings.text_enabled = False
+        self.chk_text_enable.setChecked(False)
+        self._update_preview()
+
+    # 删除图片水印并禁用
+    def _delete_image(self):
+        self.settings.image_path = None
+        self.settings.image_enabled = False
+        self.chk_img_enable.setChecked(False)
+        self._update_preview()
 
     # 批量导出（单一职责：生成文件名与保存）
     def _export_all(self):
