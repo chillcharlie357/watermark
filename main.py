@@ -16,8 +16,8 @@ try:
         QSpinBox, QSlider, QGroupBox, QLabel, QComboBox, QFileDialog, QScrollArea,
         QMessageBox, QColorDialog
     )
-    from PyQt6.QtGui import QImage, QPixmap, QIcon
-    from PyQt6.QtCore import QSize, QPoint, Qt
+    from PyQt6.QtGui import QImage, QPixmap, QIcon, QPainter, QFont, QColor, QPen, QPainterPath, QFontMetrics
+    from PyQt6.QtCore import QSize, QPoint, Qt, QTimer
     PYQT_AVAILABLE = True
 except Exception:
     PYQT_AVAILABLE = False
@@ -229,8 +229,11 @@ class WatermarkSettings:
     image_alpha: int = 255
 
     # 布局
-    position: str = "bottom-right"  # 九宫格：top-left/top-center/top-right/center-left/center/center-right/bottom-left/bottom-center/bottom-right
-    custom_pos: Optional[Tuple[int, int]] = None  # 手动拖拽坐标（左上角）
+    # 文本与图片分别的预设位置与自定义坐标
+    text_position: str = "bottom-right"
+    text_custom_pos: Optional[Tuple[int, int]] = None
+    image_position: str = "bottom-right"
+    image_custom_pos: Optional[Tuple[int, int]] = None
     rotation_deg: float = 0.0  # 可选
 
     # 导出
@@ -272,6 +275,10 @@ class WatermarkRenderer:
 
         draw = ImageDraw.Draw(image)
 
+        # 清理上次记录
+        self.last_text_rect = None
+        self.last_image_rect = None
+
         # 绘制文本水印
         if settings.text_enabled and settings.text:
             self._draw_text(draw, image, settings)
@@ -291,12 +298,12 @@ class WatermarkRenderer:
             except:
                 return ImageFont.load_default()
 
-    def _resolve_position(self, image: Image.Image, content_size: Tuple[int, int], settings: WatermarkSettings) -> Tuple[int, int]:
-        if settings.custom_pos is not None:
-            x = max(0, min(image.width - content_size[0], settings.custom_pos[0]))
-            y = max(0, min(image.height - content_size[1], settings.custom_pos[1]))
+    def _resolve_position(self, image: Image.Image, content_size: Tuple[int, int], custom_pos: Optional[Tuple[int,int]], preset_position: str) -> Tuple[int, int]:
+        if custom_pos is not None:
+            x = max(0, min(image.width - content_size[0], custom_pos[0]))
+            y = max(0, min(image.height - content_size[1], custom_pos[1]))
             return (x, y)
-        return _compute_nine_grid_position((image.width, image.height), content_size, settings.position)
+        return _compute_nine_grid_position((image.width, image.height), content_size, preset_position)
 
     def _draw_text(self, draw: ImageDraw.ImageDraw, image: Image.Image, settings: WatermarkSettings) -> None:
         font = self._get_font(settings.font_size)
@@ -318,8 +325,10 @@ class WatermarkRenderer:
         if settings.rotation_deg and abs(settings.rotation_deg) > 0.01:
             txt_img = txt_img.rotate(settings.rotation_deg, expand=True, resample=Image.Resampling.BICUBIC)
         # 计算位置并叠加
-        x, y = self._resolve_position(image, (txt_img.width, txt_img.height), settings)
+        x, y = self._resolve_position(image, (txt_img.width, txt_img.height), settings.text_custom_pos, settings.text_position)
         image.paste(txt_img, (x, y), txt_img)
+        # 记录文本水印最后矩形（原图坐标）
+        self.last_text_rect = (x, y, txt_img.width, txt_img.height)
 
     def _draw_image(self, image: Image.Image, settings: WatermarkSettings) -> None:
         try:
@@ -340,9 +349,11 @@ class WatermarkRenderer:
             if settings.rotation_deg and abs(settings.rotation_deg) > 0.01:
                 wm = wm.rotate(settings.rotation_deg, expand=True, resample=Image.Resampling.BICUBIC)
             # 位置
-            x, y = self._resolve_position(image, (wm.width, wm.height), settings)
+            x, y = self._resolve_position(image, (wm.width, wm.height), settings.image_custom_pos, settings.image_position)
             # 叠加
             image.paste(wm, (x, y), wm)
+            # 记录图片水印最后矩形（原图坐标）
+            self.last_image_rect = (x, y, wm.width, wm.height)
         except Exception as e:
             print(f"Error loading watermark image: {e}")
 
@@ -360,6 +371,15 @@ class MainWindow(QMainWindow):
         self.output_dir: Optional[str] = None
         self._dragging = False
         self._drag_offset = QPoint(0, 0)
+        # 预览优化：缓存当前图片与节流计时器
+        self._base_image: Optional[Image.Image] = None
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(16)  # ~60 FPS
+        self._preview_timer.timeout.connect(self._do_update_preview)
+        # 拖拽覆盖层：在预览上直接绘制水印
+        self._drag_base_pixmap: Optional[QPixmap] = None
+        self._drag_img_qpixmap_cache: Optional[QPixmap] = None
         # 显示/记录当前模板路径
         self._current_template_path: Optional[str] = None
 
@@ -400,22 +420,13 @@ class MainWindow(QMainWindow):
         self.preview_label.setStyleSheet("background:#333;color:#ccc")
         center_box.addWidget(self.preview_label, 10)
 
-        # 位置九宫格
-        pos_box = QHBoxLayout()
-        self.pos_combo = QComboBox()
-        self.pos_combo.addItems([
-            "top-left","top-center","top-right",
-            "center-left","center","center-right",
-            "bottom-left","bottom-center","bottom-right"
-        ])
-        self.pos_combo.setCurrentText(self.settings.position)
-        self.pos_combo.currentTextChanged.connect(self._on_position_changed)
-        self.chk_drag = QCheckBox("启用拖拽定位")
-        self.chk_drag.setChecked(False)
-        pos_box.addWidget(QLabel("预设位置"))
-        pos_box.addWidget(self.pos_combo)
-        pos_box.addWidget(self.chk_drag)
-        center_box.addLayout(pos_box)
+        # 预览内部状态：用于拖拽映射
+        self._preview_scale_x = 1.0
+        self._preview_scale_y = 1.0
+        self._preview_offset_x = 0
+        self._preview_offset_y = 0
+        self._drag_target = None  # 'text' | 'image' | None
+        self._drag_start_pos_img = (0, 0)  # 原图坐标中的起始左上角
 
         layout.addLayout(center_box, 7)
 
@@ -443,6 +454,22 @@ class MainWindow(QMainWindow):
         self.sp_stroke = QSpinBox(); self.sp_stroke.setRange(0, 10); self.sp_stroke.setValue(self.settings.stroke_width); self.sp_stroke.valueChanged.connect(self._on_stroke_width_changed)
         vb_text.addWidget(self.chk_text_enable)
         vb_text.addWidget(self.btn_del_text)
+        # 文本位置与拖拽
+        pos_text_row = QHBoxLayout()
+        pos_text_row.addWidget(QLabel("文本位置"))
+        self.pos_text_combo = QComboBox()
+        self.pos_text_combo.addItems([
+            "top-left","top-center","top-right",
+            "center-left","center","center-right",
+            "bottom-left","bottom-center","bottom-right"
+        ])
+        self.pos_text_combo.setCurrentText(self.settings.text_position)
+        self.pos_text_combo.currentTextChanged.connect(self._on_text_position_changed)
+        self.chk_text_drag = QCheckBox("拖拽文本")
+        self.chk_text_drag.setChecked(False)
+        pos_text_row.addWidget(self.pos_text_combo)
+        pos_text_row.addWidget(self.chk_text_drag)
+        vb_text.addLayout(pos_text_row)
         vb_text.addWidget(QLabel("文本内容")); vb_text.addWidget(self.txt_input)
         vb_text.addWidget(QLabel("字号")); vb_text.addWidget(self.sp_font)
         vb_text.addWidget(self.btn_color)
@@ -467,6 +494,22 @@ class MainWindow(QMainWindow):
         vb_img.addWidget(self.chk_img_enable)
         vb_img.addWidget(self.btn_choose_img)
         vb_img.addWidget(self.btn_del_img)
+        # 图片位置与拖拽
+        pos_img_row = QHBoxLayout()
+        pos_img_row.addWidget(QLabel("图片位置"))
+        self.pos_img_combo = QComboBox()
+        self.pos_img_combo.addItems([
+            "top-left","top-center","top-right",
+            "center-left","center","center-right",
+            "bottom-left","bottom-center","bottom-right"
+        ])
+        self.pos_img_combo.setCurrentText(self.settings.image_position)
+        self.pos_img_combo.currentTextChanged.connect(self._on_img_position_changed)
+        self.chk_img_drag_ctrl = QCheckBox("拖拽图片")
+        self.chk_img_drag_ctrl.setChecked(False)
+        pos_img_row.addWidget(self.pos_img_combo)
+        pos_img_row.addWidget(self.chk_img_drag_ctrl)
+        vb_img.addLayout(pos_img_row)
         vb_img.addWidget(QLabel("缩放(%)")); vb_img.addWidget(self.sp_img_scale)
         vb_img.addWidget(QLabel("不透明度")); vb_img.addWidget(self.slider_img_alpha)
         right_box.addWidget(grp_img)
@@ -590,7 +633,15 @@ class MainWindow(QMainWindow):
 
     def _on_image_selected(self, idx: int):
         self.current_index = idx
-        self._update_preview()
+        # 选择图片时预加载到内存，减少每次渲染的文件IO
+        try:
+            if 0 <= idx < len(self.image_paths):
+                path = self.image_paths[idx]
+                with Image.open(path) as im:
+                    self._base_image = im.copy()
+        except Exception:
+            self._base_image = None
+        self._do_update_preview()
 
     # 拖拽导入
     def dragEnterEvent(self, e):
@@ -619,30 +670,61 @@ class MainWindow(QMainWindow):
                         collected.append(os.path.join(root, n))
             self._append_images(collected)
 
-    # 预览更新（单一职责：渲染当前图片与设置）
+    # 预览更新：拖拽期间节流，非拖拽即时
     def _update_preview(self):
+        if self._dragging:
+            # 拖拽时合并高频事件，约 60FPS 更新
+            if not self._preview_timer.isActive():
+                self._preview_timer.start()
+            return
+        # 非拖拽时立即渲染
+        self._do_update_preview()
+
+    # 实际渲染逻辑（渲染当前图片与设置）
+    def _do_update_preview(self):
         if self.current_index < 0 or self.current_index >= len(self.image_paths):
             return
         path = self.image_paths[self.current_index]
         try:
-            with Image.open(path) as im:
-                out = self.renderer.render(im.copy(), self.settings)
-                # 为避免预览过大，缩放到窗口大小
-                label_w = self.preview_label.width()
-                label_h = self.preview_label.height()
-                if out.width > 0 and out.height > 0:
-                    scale_w = label_w - 20
-                    scale_h = label_h - 20
-                    if scale_w > 50 and scale_h > 50:
-                        out.thumbnail((scale_w, scale_h), Image.Resampling.LANCZOS)
-                self.preview_label.setPixmap(_pil_to_qpixmap(out))
+            # 使用缓存的原图，避免每次打开文件造成卡顿
+            base = None
+            if self._base_image is not None:
+                base = self._base_image.copy()
+            else:
+                with Image.open(path) as im:
+                    base = im.copy()
+                    self._base_image = base.copy()
+
+            out = self.renderer.render(base, self.settings)
+            # 为避免预览过大，缩放到窗口大小
+            label_w = self.preview_label.width()
+            label_h = self.preview_label.height()
+            if out.width > 0 and out.height > 0:
+                pre_w, pre_h = out.width, out.height
+                scale_w = label_w - 20
+                scale_h = label_h - 20
+                if scale_w > 50 and scale_h > 50:
+                    # 拖拽时使用较快的插值以提升实时性
+                    resample = Image.Resampling.BILINEAR if self._dragging else Image.Resampling.LANCZOS
+                    out.thumbnail((scale_w, scale_h), resample)
+                # 计算缩放与偏移用于命中测试
+                self._preview_scale_x = (out.width / pre_w) if pre_w else 1.0
+                self._preview_scale_y = (out.height / pre_h) if pre_h else 1.0
+                self._preview_offset_x = max(0, (label_w - out.width) // 2)
+                self._preview_offset_y = max(0, (label_h - out.height) // 2)
+            self.preview_label.setPixmap(_pil_to_qpixmap(out))
         except Exception as e:
             print(f"Preview error: {e}")
 
     # 预设位置变更
-    def _on_position_changed(self, v: str):
-        self.settings.position = v
-        self.settings.custom_pos = None
+    def _on_text_position_changed(self, v: str):
+        self.settings.text_position = v
+        self.settings.text_custom_pos = None
+        self._update_preview()
+
+    def _on_img_position_changed(self, v: str):
+        self.settings.image_position = v
+        self.settings.image_custom_pos = None
         self._update_preview()
 
     # 文本设置回调
@@ -732,23 +814,189 @@ class MainWindow(QMainWindow):
 
     # 预览区拖拽定位（单一职责：处理手动拖拽）
     def mousePressEvent(self, e):
-        if self.chk_drag.isChecked() and e.button() == Qt.MouseButton.LeftButton and self.preview_label.underMouse():
-            self._dragging = True
-            self._drag_offset = e.position().toPoint()
+        if e.button() == Qt.MouseButton.LeftButton and self.preview_label.underMouse():
+            # 将鼠标位置映射到预览标签坐标
+            pt = self.preview_label.mapFromGlobal(e.globalPosition().toPoint())
+            x_in_label = pt.x() - self._preview_offset_x
+            y_in_label = pt.y() - self._preview_offset_y
+            # 命中文本或图片矩形（缩放后）
+            hit_target = None
+            def hit(rect):
+                if not rect:
+                    return False
+                rx, ry, rw, rh = rect
+                sx = int(rx * self._preview_scale_x)
+                sy = int(ry * self._preview_scale_y)
+                sw = int(rw * self._preview_scale_x)
+                sh = int(rh * self._preview_scale_y)
+                return 0 <= x_in_label - sx < sw and 0 <= y_in_label - sy < sh
+
+            if self.chk_text_drag.isChecked() and hit(self.renderer.last_text_rect):
+                hit_target = 'text'
+            elif self.chk_img_drag_ctrl.isChecked() and hit(self.renderer.last_image_rect):
+                hit_target = 'image'
+
+            if hit_target:
+                self._dragging = True
+                self._drag_target = hit_target
+                # 记录起始点（原图坐标）
+                if hit_target == 'text' and self.renderer.last_text_rect:
+                    self._drag_start_pos_img = (self.renderer.last_text_rect[0], self.renderer.last_text_rect[1])
+                elif hit_target == 'image' and self.renderer.last_image_rect:
+                    self._drag_start_pos_img = (self.renderer.last_image_rect[0], self.renderer.last_image_rect[1])
+                # 记录按下的预览坐标
+                self._drag_offset = pt
+                # 准备拖拽覆盖层：生成无水印的预览底图
+                try:
+                    self._prepare_drag_base_preview()
+                except Exception:
+                    pass
 
     def mouseMoveEvent(self, e):
-        if self._dragging and self.current_index >= 0:
-            # 将鼠标坐标映射到原图坐标（近似，基于缩放后的预览尺寸）
-            pos = e.position().toPoint()
-            dx = pos.x() - self._drag_offset.x()
-            dy = pos.y() - self._drag_offset.y()
-            # 简化实现：直接使用预览坐标作为自定义位置
-            self.settings.custom_pos = (max(0, dx), max(0, dy))
-            self._update_preview()
+        if self._dragging and self.current_index >= 0 and self._drag_target:
+            pt = self.preview_label.mapFromGlobal(e.globalPosition().toPoint())
+            dx_label = pt.x() - self._drag_offset.x()
+            dy_label = pt.y() - self._drag_offset.y()
+            # 转换到原图坐标的增量
+            dx_img = int(dx_label / (self._preview_scale_x or 1.0))
+            dy_img = int(dy_label / (self._preview_scale_y or 1.0))
+            start_x, start_y = self._drag_start_pos_img
+            new_x = max(0, start_x + dx_img)
+            new_y = max(0, start_y + dy_img)
+            if self._drag_target == 'text':
+                self.settings.text_custom_pos = (new_x, new_y)
+            elif self._drag_target == 'image':
+                self.settings.image_custom_pos = (new_x, new_y)
+            # 拖拽中使用覆盖层快速刷新
+            self._update_overlay_preview()
 
     def mouseReleaseEvent(self, e):
         if self._dragging and e.button() == Qt.MouseButton.LeftButton:
             self._dragging = False
+            self._drag_target = None
+            # 拖拽结束，进行一次高质量整图渲染
+            self._drag_base_pixmap = None
+            self._drag_img_qpixmap_cache = None
+            self._do_update_preview()
+
+    # 生成无水印的预览底图（仅用于拖拽期间覆盖层绘制）
+    def _prepare_drag_base_preview(self):
+        if self.current_index < 0 or self.current_index >= len(self.image_paths):
+            return
+        path = self.image_paths[self.current_index]
+        # 使用缓存原图
+        base = None
+        if self._base_image is not None:
+            base = self._base_image.copy()
+        else:
+            with Image.open(path) as im:
+                base = im.copy()
+                self._base_image = base.copy()
+        # 暂时禁用水印后渲染一次作为预览底图
+        s = self.settings
+        original_text_enabled = s.text_enabled
+        original_image_enabled = s.image_enabled
+        s.text_enabled = False
+        s.image_enabled = False
+        try:
+            out = self.renderer.render(base, s)
+        finally:
+            s.text_enabled = original_text_enabled
+            s.image_enabled = original_image_enabled
+        # 缩放到预览大小并记录缩放参数（与正常预览一致）
+        label_w = self.preview_label.width()
+        label_h = self.preview_label.height()
+        if out.width > 0 and out.height > 0:
+            pre_w, pre_h = out.width, out.height
+            scale_w = label_w - 20
+            scale_h = label_h - 20
+            if scale_w > 50 and scale_h > 50:
+                out.thumbnail((scale_w, scale_h), Image.Resampling.BILINEAR)
+            self._preview_scale_x = (out.width / pre_w) if pre_w else 1.0
+            self._preview_scale_y = (out.height / pre_h) if pre_h else 1.0
+            self._preview_offset_x = max(0, (label_w - out.width) // 2)
+            self._preview_offset_y = max(0, (label_h - out.height) // 2)
+        self._drag_base_pixmap = _pil_to_qpixmap(out)
+        self.preview_label.setPixmap(self._drag_base_pixmap)
+
+    # 在预览上快速叠加水印（拖拽期间）
+    def _update_overlay_preview(self):
+        if not self._drag_base_pixmap:
+            # 兜底：若底图未就绪则走正常预览
+            self._do_update_preview()
+            return
+        pix = QPixmap(self._drag_base_pixmap)
+        painter = QPainter(pix)
+        try:
+            s = self.settings
+            # 绘制文本水印
+            if s.text_enabled and s.text:
+                # 位置转换到预览坐标
+                if self.renderer.last_text_rect:
+                    cw, ch = self.renderer.last_text_rect[2], self.renderer.last_text_rect[3]
+                else:
+                    cw, ch = 100, 40  # 兜底估计
+                if s.text_custom_pos:
+                    tx, ty = s.text_custom_pos
+                elif self.renderer.last_text_rect:
+                    tx, ty = self.renderer.last_text_rect[0], self.renderer.last_text_rect[1]
+                else:
+                    tx, ty = 10, 10
+                px = self._preview_offset_x + round(tx * self._preview_scale_x)
+                py = self._preview_offset_y + round(ty * self._preview_scale_y)
+                # 字体与颜色
+                font = QFont()
+                # 将原始字体像素大小按预览缩放比例缩放，避免拖拽时视觉尺寸变化
+                scale = max(0.1, min(self._preview_scale_x, self._preview_scale_y))
+                font.setPixelSize(max(10, int(s.font_size * scale)))
+                painter.setFont(font)
+                color = QColor(s.color[0], s.color[1], s.color[2], s.text_alpha)
+                # 描边：使用路径绘制获得更好效果
+                path = QPainterPath()
+                # 使用字体度量的 ascent 将基线对齐到文本矩形的顶部，避免垂直位置偏移
+                fm = QFontMetrics(font)
+                baseline_y = py + fm.ascent()
+                path.addText(px, baseline_y, font, s.text)
+                if s.stroke_enabled and s.stroke_width > 0:
+                    pen = QPen(QColor(s.stroke_color[0], s.stroke_color[1], s.stroke_color[2]))
+                    pen.setWidth(max(1, int(s.stroke_width * scale)))
+                    painter.setPen(pen)
+                    painter.drawPath(path)
+                painter.fillPath(path, color)
+
+            # 绘制图片水印
+            if s.image_enabled and s.image_path:
+                # 仅缓存原始 QPixmap，实际绘制时按需要尺寸缩放，避免重复缩放导致尺寸偏差
+                if self._drag_img_qpixmap_cache is None:
+                    try:
+                        wm = QPixmap(s.image_path)
+                        if not wm.isNull():
+                            self._drag_img_qpixmap_cache = wm
+                    except Exception:
+                        self._drag_img_qpixmap_cache = None
+                if self._drag_img_qpixmap_cache:
+                    if self.renderer.last_image_rect:
+                        iw, ih = self.renderer.last_image_rect[2], self.renderer.last_image_rect[3]
+                    else:
+                        iw, ih = self._drag_img_qpixmap_cache.width(), self._drag_img_qpixmap_cache.height()
+                    if s.image_custom_pos:
+                        ix, iy = s.image_custom_pos
+                    elif self.renderer.last_image_rect:
+                        ix, iy = self.renderer.last_image_rect[0], self.renderer.last_image_rect[1]
+                    else:
+                        ix, iy = 10, 10
+                    px = self._preview_offset_x + round(ix * self._preview_scale_x)
+                    py = self._preview_offset_y + round(iy * self._preview_scale_y)
+                    # 叠加到预览，按预览缩放显示
+                    draw_w = max(1, round(iw * self._preview_scale_x))
+                    draw_h = max(1, round(ih * self._preview_scale_y))
+                    painter.setOpacity(max(0.0, min(1.0, s.image_alpha / 255.0)))
+                    # 根据用户的缩放百分比与渲染器计算得到的矩形宽高来绘制，确保尺寸一致
+                    scaled = self._drag_img_qpixmap_cache.scaled(draw_w, draw_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+                    painter.drawPixmap(px, py, scaled)
+        finally:
+            painter.end()
+        self.preview_label.setPixmap(pix)
 
     # 关闭时自动保存上次设置（单一职责：持久化当前会话）
     def closeEvent(self, e):
@@ -900,8 +1148,11 @@ class MainWindow(QMainWindow):
             "image_path": s.image_path,
             "image_scale_percent": s.image_scale_percent,
             "image_alpha": s.image_alpha,
-            "position": s.position,
-            "custom_pos": s.custom_pos,
+            # 独立的文本/图片位置与自定义坐标
+            "text_position": s.text_position,
+            "text_custom_pos": s.text_custom_pos,
+            "image_position": s.image_position,
+            "image_custom_pos": s.image_custom_pos,
             "rotation_deg": s.rotation_deg,
             "output_format": s.output_format,
             "naming_rule": s.naming_rule,
@@ -925,8 +1176,13 @@ class MainWindow(QMainWindow):
         s.image_path = d.get("image_path", s.image_path)
         s.image_scale_percent = d.get("image_scale_percent", s.image_scale_percent)
         s.image_alpha = d.get("image_alpha", s.image_alpha)
-        s.position = d.get("position", s.position)
-        s.custom_pos = tuple(d.get("custom_pos")) if d.get("custom_pos") else None
+        # 兼容旧字段
+        old_pos = d.get("position")
+        old_custom = d.get("custom_pos")
+        s.text_position = d.get("text_position", old_pos if old_pos else s.text_position)
+        s.text_custom_pos = tuple(d.get("text_custom_pos")) if d.get("text_custom_pos") else (tuple(old_custom) if old_custom else s.text_custom_pos)
+        s.image_position = d.get("image_position", old_pos if old_pos else s.image_position)
+        s.image_custom_pos = tuple(d.get("image_custom_pos")) if d.get("image_custom_pos") else (tuple(old_custom) if old_custom else s.image_custom_pos)
         s.rotation_deg = d.get("rotation_deg", s.rotation_deg)
         s.output_format = d.get("output_format", s.output_format)
         s.naming_rule = d.get("naming_rule", s.naming_rule)
@@ -945,10 +1201,12 @@ class MainWindow(QMainWindow):
         self.slider_alpha.setValue(s.text_alpha)
         self.chk_stroke.setChecked(s.stroke_enabled)
         self.sp_stroke.setValue(s.stroke_width)
+        self.pos_text_combo.setCurrentText(s.text_position)
         # 图片水印
         self.chk_img_enable.setChecked(s.image_enabled)
         self.sp_img_scale.setValue(s.image_scale_percent)
         self.slider_img_alpha.setValue(s.image_alpha)
+        self.pos_img_combo.setCurrentText(s.image_position)
         # 导出设置
         self.cmb_format.setCurrentText(s.output_format)
         self.cmb_naming.setCurrentText(s.naming_rule)
@@ -966,13 +1224,13 @@ class MainWindow(QMainWindow):
     # 根据启用开关禁用/启用文本水印相关控件
     def _update_text_controls_enabled(self):
         enabled = self.chk_text_enable.isChecked()
-        for w in [self.txt_input, self.sp_font, self.btn_color, self.slider_alpha, self.chk_stroke, self.sp_stroke]:
+        for w in [self.txt_input, self.sp_font, self.btn_color, self.slider_alpha, self.chk_stroke, self.sp_stroke, self.pos_text_combo, self.chk_text_drag]:
             w.setEnabled(enabled)
 
     # 根据启用开关禁用/启用图片水印相关控件
     def _update_img_controls_enabled(self):
         enabled = self.chk_img_enable.isChecked()
-        for w in [self.btn_choose_img, self.sp_img_scale, self.slider_img_alpha]:
+        for w in [self.btn_choose_img, self.sp_img_scale, self.slider_img_alpha, self.pos_img_combo, self.chk_img_drag_ctrl]:
             w.setEnabled(enabled)
 
     # 根据输出格式隐藏/显示 JPEG 质量控件
@@ -986,6 +1244,7 @@ class MainWindow(QMainWindow):
         self.settings.text = ""
         self.txt_input.setText("")
         self.settings.text_enabled = False
+        self.settings.text_custom_pos = None
         self.chk_text_enable.setChecked(False)
         self._update_preview()
 
@@ -993,6 +1252,7 @@ class MainWindow(QMainWindow):
     def _delete_image(self):
         self.settings.image_path = None
         self.settings.image_enabled = False
+        self.settings.image_custom_pos = None
         self.chk_img_enable.setChecked(False)
         self._update_preview()
 
