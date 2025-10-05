@@ -16,8 +16,8 @@ try:
         QSpinBox, QSlider, QGroupBox, QLabel, QComboBox, QFileDialog, QScrollArea,
         QMessageBox, QColorDialog
     )
-    from PyQt6.QtGui import QImage, QPixmap, QIcon, QPainter, QFont, QColor, QPen, QPainterPath, QFontMetrics
-    from PyQt6.QtCore import QSize, QPoint, Qt, QTimer
+    from PyQt6.QtGui import QImage, QPixmap, QIcon, QPainter, QFont, QColor, QPen, QPainterPath, QFontMetrics, QTransform
+    from PyQt6.QtCore import QSize, QPoint, Qt, QTimer, QRectF
     PYQT_AVAILABLE = True
 except Exception:
     PYQT_AVAILABLE = False
@@ -234,7 +234,9 @@ class WatermarkSettings:
     text_custom_pos: Optional[Tuple[int, int]] = None
     image_position: str = "bottom-right"
     image_custom_pos: Optional[Tuple[int, int]] = None
-    rotation_deg: float = 0.0  # 可选
+    # 旋转角度分离：文本与图片各自控制
+    text_rotation_deg: float = 0.0
+    image_rotation_deg: float = 0.0
 
     # 导出
     output_format: str = "JPEG"  # JPEG 或 PNG
@@ -322,8 +324,8 @@ class WatermarkRenderer:
         stroke_fill = (*settings.stroke_color, settings.text_alpha) if settings.stroke_enabled else None
         txt_draw.text((0, 0), settings.text, fill=fill, font=font, stroke_width=stroke_w, stroke_fill=stroke_fill)
         # 仅旋转文本层
-        if settings.rotation_deg and abs(settings.rotation_deg) > 0.01:
-            txt_img = txt_img.rotate(settings.rotation_deg, expand=True, resample=Image.Resampling.BICUBIC)
+        if settings.text_rotation_deg and abs(settings.text_rotation_deg) > 0.01:
+            txt_img = txt_img.rotate(settings.text_rotation_deg, expand=True, resample=Image.Resampling.BICUBIC)
         # 计算位置并叠加
         x, y = self._resolve_position(image, (txt_img.width, txt_img.height), settings.text_custom_pos, settings.text_position)
         image.paste(txt_img, (x, y), txt_img)
@@ -346,8 +348,8 @@ class WatermarkRenderer:
                 alpha = alpha.point(lambda p: int(p * (settings.image_alpha / 255.0)))
                 wm.putalpha(alpha)
             # 仅旋转水印图片
-            if settings.rotation_deg and abs(settings.rotation_deg) > 0.01:
-                wm = wm.rotate(settings.rotation_deg, expand=True, resample=Image.Resampling.BICUBIC)
+            if settings.image_rotation_deg and abs(settings.image_rotation_deg) > 0.01:
+                wm = wm.rotate(settings.image_rotation_deg, expand=True, resample=Image.Resampling.BICUBIC)
             # 位置
             x, y = self._resolve_position(image, (wm.width, wm.height), settings.image_custom_pos, settings.image_position)
             # 叠加
@@ -380,6 +382,9 @@ class MainWindow(QMainWindow):
         # 拖拽覆盖层：在预览上直接绘制水印
         self._drag_base_pixmap: Optional[QPixmap] = None
         self._drag_img_qpixmap_cache: Optional[QPixmap] = None
+        # 预览叠加缓存：文本（未旋转版本）与其键
+        self._drag_text_unrotated_cache: Optional[QPixmap] = None
+        self._drag_text_cache_key: Optional[tuple] = None
         # 显示/记录当前模板路径
         self._current_template_path: Optional[str] = None
 
@@ -475,6 +480,13 @@ class MainWindow(QMainWindow):
         vb_text.addWidget(self.btn_color)
         vb_text.addWidget(QLabel("不透明度")); vb_text.addWidget(self.slider_alpha)
         vb_text.addWidget(self.chk_stroke); vb_text.addWidget(QLabel("描边宽度")); vb_text.addWidget(self.sp_stroke)
+        # 文本旋转
+        rot_row = QHBoxLayout()
+        rot_row.addWidget(QLabel("文本旋转(°)"))
+        self.sp_text_rotation = QSpinBox(); self.sp_text_rotation.setRange(-180, 180); self.sp_text_rotation.setValue(int(self.settings.text_rotation_deg))
+        self.sp_text_rotation.valueChanged.connect(self._on_text_rotation_changed)
+        rot_row.addWidget(self.sp_text_rotation)
+        vb_text.addLayout(rot_row)
         right_box.addWidget(grp_text)
 
         # 图片水印设置
@@ -512,6 +524,13 @@ class MainWindow(QMainWindow):
         vb_img.addLayout(pos_img_row)
         vb_img.addWidget(QLabel("缩放(%)")); vb_img.addWidget(self.sp_img_scale)
         vb_img.addWidget(QLabel("不透明度")); vb_img.addWidget(self.slider_img_alpha)
+        # 图片旋转
+        rot_img_row = QHBoxLayout()
+        rot_img_row.addWidget(QLabel("图片旋转(°)"))
+        self.sp_img_rotation = QSpinBox(); self.sp_img_rotation.setRange(-180, 180); self.sp_img_rotation.setValue(int(self.settings.image_rotation_deg))
+        self.sp_img_rotation.valueChanged.connect(self._on_image_rotation_changed)
+        rot_img_row.addWidget(self.sp_img_rotation)
+        vb_img.addLayout(rot_img_row)
         right_box.addWidget(grp_img)
 
         # 导出设置
@@ -519,6 +538,9 @@ class MainWindow(QMainWindow):
         vb_out = QVBoxLayout(grp_out)
         self.btn_choose_out = QPushButton("选择输出目录")
         self.btn_choose_out.clicked.connect(self._choose_output_dir)
+        # 显示当前选择的输出目录
+        self.lbl_out_dir = QLabel("输出目录：未选择")
+        self.lbl_out_dir.setWordWrap(True)
         self.cmb_format = QComboBox(); self.cmb_format.addItems(["JPEG", "PNG"]); self.cmb_format.setCurrentText(self.settings.output_format)
         self.cmb_format.currentTextChanged.connect(lambda v: self._set_output_format(v))
         self.cmb_naming = QComboBox(); self.cmb_naming.addItems(["original", "prefix", "suffix"]); self.cmb_naming.setCurrentText(self.settings.naming_rule)
@@ -534,6 +556,7 @@ class MainWindow(QMainWindow):
         self.chk_resize.stateChanged.connect(lambda _: self._toggle_resize())
         self.lbl_quality = QLabel("JPEG质量")
         vb_out.addWidget(self.btn_choose_out)
+        vb_out.addWidget(self.lbl_out_dir)
         vb_out.addWidget(QLabel("输出格式")); vb_out.addWidget(self.cmb_format)
         vb_out.addWidget(QLabel("命名规则")); vb_out.addWidget(self.cmb_naming)
         vb_out.addWidget(QLabel("前缀")); vb_out.addWidget(self.ed_prefix)
@@ -579,6 +602,9 @@ class MainWindow(QMainWindow):
         self._update_img_controls_enabled()
         self._update_output_format_controls()
         self.sp_resize.setEnabled(self.chk_resize.isChecked())
+        # 初始化输出目录标签
+        if getattr(self, 'output_dir', None):
+            self._update_output_dir_label()
 
     # 文件导入相关（单一职责：管理图片列表）
     def _add_files(self):
@@ -730,10 +756,12 @@ class MainWindow(QMainWindow):
     # 文本设置回调
     def _on_text_changed(self, v: str):
         self.settings.text = v
+        self._invalidate_overlay_caches()
         self._update_preview()
 
     def _on_font_changed(self, v: int):
         self.settings.font_size = v
+        self._invalidate_overlay_caches()
         self._update_preview()
 
     def _choose_color(self):
@@ -744,14 +772,33 @@ class MainWindow(QMainWindow):
 
     def _on_alpha_changed(self, v: int):
         self.settings.text_alpha = v
+        # 叠加层快速预览
+        try:
+            self._invalidate_overlay_caches()
+            self._prepare_drag_base_preview()
+            self._update_overlay_preview()
+        except Exception:
+            pass
         self._update_preview()
 
     def _on_stroke_toggle(self):
         self.settings.stroke_enabled = self.chk_stroke.isChecked()
+        try:
+            self._invalidate_overlay_caches()
+            self._prepare_drag_base_preview()
+            self._update_overlay_preview()
+        except Exception:
+            pass
         self._update_preview()
 
     def _on_stroke_width_changed(self, v: int):
         self.settings.stroke_width = v
+        try:
+            self._invalidate_overlay_caches()
+            self._prepare_drag_base_preview()
+            self._update_overlay_preview()
+        except Exception:
+            pass
         self._update_preview()
 
     def _on_text_enable_toggled(self):
@@ -775,17 +822,50 @@ class MainWindow(QMainWindow):
 
     def _on_img_scale_changed(self, v: int):
         self.settings.image_scale_percent = v
+        try:
+            self._prepare_drag_base_preview()
+            self._update_overlay_preview()
+        except Exception:
+            pass
         self._update_preview()
 
     def _on_img_alpha_changed(self, v: int):
         self.settings.image_alpha = v
+        try:
+            self._prepare_drag_base_preview()
+            self._update_overlay_preview()
+        except Exception:
+            pass
+        self._update_preview()
+
+    def _on_text_rotation_changed(self, v: int):
+        self.settings.text_rotation_deg = float(v)
+        try:
+            self._prepare_drag_base_preview()
+            self._update_overlay_preview()
+        except Exception:
+            pass
+        self._update_preview()
+
+    def _on_image_rotation_changed(self, v: int):
+        self.settings.image_rotation_deg = float(v)
+        try:
+            self._prepare_drag_base_preview()
+            self._update_overlay_preview()
+        except Exception:
+            pass
         self._update_preview()
 
     # 导出设置回调
     def _choose_output_dir(self):
         d = QFileDialog.getExistingDirectory(self, "选择输出目录", "")
         if d:
+            # 提前校验：禁止选择与任何源图片相同的目录
+            if any(os.path.dirname(p) == d for p in self.image_paths):
+                QMessageBox.warning(self, "提示", "默认禁止导出到原目录，请选择不同的输出目录")
+                return
             self.output_dir = d
+            self._update_output_dir_label()
 
     def _set_output_format(self, v: str):
         self.settings.output_format = v
@@ -918,6 +998,13 @@ class MainWindow(QMainWindow):
             self._preview_offset_y = max(0, (label_h - out.height) // 2)
         self._drag_base_pixmap = _pil_to_qpixmap(out)
         self.preview_label.setPixmap(self._drag_base_pixmap)
+        # 缩放或底图变化后，使叠加缓存失效
+        self._invalidate_overlay_caches()
+
+    def _invalidate_overlay_caches(self):
+        # 文本未旋转缓存失效
+        self._drag_text_unrotated_cache = None
+        self._drag_text_cache_key = None
 
     # 在预览上快速叠加水印（拖拽期间）
     def _update_overlay_preview(self):
@@ -931,42 +1018,74 @@ class MainWindow(QMainWindow):
             s = self.settings
             # 绘制文本水印
             if s.text_enabled and s.text:
-                # 位置转换到预览坐标
-                if self.renderer.last_text_rect:
-                    cw, ch = self.renderer.last_text_rect[2], self.renderer.last_text_rect[3]
+                # 构建/复用未旋转文本缓存
+                scale = max(0.1, min(self._preview_scale_x, self._preview_scale_y))
+                font_px = max(10, int(s.font_size * scale))
+                key = (
+                    s.text,
+                    font_px,
+                    s.color,
+                    s.text_alpha,
+                    bool(s.stroke_enabled),
+                    max(0, int(s.stroke_width * scale)),
+                    s.stroke_color,
+                )
+                if self._drag_text_cache_key != key or self._drag_text_unrotated_cache is None:
+                    font = QFont()
+                    font.setPixelSize(font_px)
+                    color = QColor(s.color[0], s.color[1], s.color[2], s.text_alpha)
+                    fm = QFontMetrics(font)
+                    rect = fm.boundingRect(s.text)
+                    img_w = max(1, rect.width())
+                    img_h = max(1, rect.height())
+                    txt_img = QImage(img_w, img_h, QImage.Format.Format_ARGB32_Premultiplied)
+                    txt_img.fill(0)
+                    p2 = QPainter(txt_img)
+                    p2.setFont(font)
+                    path = QPainterPath()
+                    path.addText(0, fm.ascent(), font, s.text)
+                    if s.stroke_enabled and s.stroke_width > 0:
+                        pen = QPen(QColor(s.stroke_color[0], s.stroke_color[1], s.stroke_color[2]))
+                        pen.setWidth(max(1, int(s.stroke_width * scale)))
+                        p2.setPen(pen)
+                        p2.drawPath(path)
+                    p2.fillPath(path, color)
+                    p2.end()
+                    self._drag_text_unrotated_cache = QPixmap.fromImage(txt_img)
+                    self._drag_text_cache_key = key
+
+                txt_px = self._drag_text_unrotated_cache
+                # 计算用于定位的尺寸：考虑旋转后的包围盒
+                if s.text_rotation_deg and abs(s.text_rotation_deg) > 0.01:
+                    tf = QTransform(); tf.rotate(s.text_rotation_deg)
+                    bbox = tf.mapRect(QRectF(0, 0, txt_px.width(), txt_px.height()))
+                    content_w, content_h = int(round(bbox.width())), int(round(bbox.height()))
                 else:
-                    cw, ch = 100, 40  # 兜底估计
+                    content_w, content_h = txt_px.width(), txt_px.height()
+
+                # 坐标与九宫格定位
                 if s.text_custom_pos:
                     tx, ty = s.text_custom_pos
-                elif self.renderer.last_text_rect:
-                    tx, ty = self.renderer.last_text_rect[0], self.renderer.last_text_rect[1]
                 else:
-                    tx, ty = 10, 10
+                    base_w = self._base_image.width if self._base_image else content_w
+                    base_h = self._base_image.height if self._base_image else content_h
+                    tx, ty = _compute_nine_grid_position((base_w, base_h), (content_w, content_h), s.text_position)
                 px = self._preview_offset_x + round(tx * self._preview_scale_x)
                 py = self._preview_offset_y + round(ty * self._preview_scale_y)
-                # 字体与颜色
-                font = QFont()
-                # 将原始字体像素大小按预览缩放比例缩放，避免拖拽时视觉尺寸变化
-                scale = max(0.1, min(self._preview_scale_x, self._preview_scale_y))
-                font.setPixelSize(max(10, int(s.font_size * scale)))
-                painter.setFont(font)
-                color = QColor(s.color[0], s.color[1], s.color[2], s.text_alpha)
-                # 描边：使用路径绘制获得更好效果
-                path = QPainterPath()
-                # 使用字体度量的 ascent 将基线对齐到文本矩形的顶部，避免垂直位置偏移
-                fm = QFontMetrics(font)
-                baseline_y = py + fm.ascent()
-                path.addText(px, baseline_y, font, s.text)
-                if s.stroke_enabled and s.stroke_width > 0:
-                    pen = QPen(QColor(s.stroke_color[0], s.stroke_color[1], s.stroke_color[2]))
-                    pen.setWidth(max(1, int(s.stroke_width * scale)))
-                    painter.setPen(pen)
-                    painter.drawPath(path)
-                painter.fillPath(path, color)
+
+                # 绘制：使用 painter 旋转而非生成旋转位图
+                if s.text_rotation_deg and abs(s.text_rotation_deg) > 0.01:
+                    painter.save()
+                    painter.translate(px, py)
+                    painter.rotate(s.text_rotation_deg)
+                    painter.drawPixmap(0, 0, txt_px)
+                    painter.restore()
+                else:
+                    painter.drawPixmap(px, py, txt_px)
 
             # 绘制图片水印
             if s.image_enabled and s.image_path:
-                # 仅缓存原始 QPixmap，实际绘制时按需要尺寸缩放，避免重复缩放导致尺寸偏差
+                # 仅缓存原始 QPixmap，实际绘制时用 painter 旋转与按需缩放
                 if self._drag_img_qpixmap_cache is None:
                     try:
                         wm = QPixmap(s.image_path)
@@ -975,10 +1094,12 @@ class MainWindow(QMainWindow):
                     except Exception:
                         self._drag_img_qpixmap_cache = None
                 if self._drag_img_qpixmap_cache:
+                    # 目标绘制矩形（未保持比例的理论大小）
                     if self.renderer.last_image_rect:
                         iw, ih = self.renderer.last_image_rect[2], self.renderer.last_image_rect[3]
                     else:
                         iw, ih = self._drag_img_qpixmap_cache.width(), self._drag_img_qpixmap_cache.height()
+                    # 原始位置（像素坐标经预览缩放）
                     if s.image_custom_pos:
                         ix, iy = s.image_custom_pos
                     elif self.renderer.last_image_rect:
@@ -987,13 +1108,38 @@ class MainWindow(QMainWindow):
                         ix, iy = 10, 10
                     px = self._preview_offset_x + round(ix * self._preview_scale_x)
                     py = self._preview_offset_y + round(iy * self._preview_scale_y)
-                    # 叠加到预览，按预览缩放显示
+                    # 预览缩放后的目标矩形大小
                     draw_w = max(1, round(iw * self._preview_scale_x))
                     draw_h = max(1, round(ih * self._preview_scale_y))
+                    # 旋转后的包围盒尺寸（用于 KeepAspectRatio 计算）
+                    src_w, src_h = self._drag_img_qpixmap_cache.width(), self._drag_img_qpixmap_cache.height()
+                    if s.image_rotation_deg and abs(s.image_rotation_deg) > 0.01:
+                        tf = QTransform(); tf.rotate(s.image_rotation_deg)
+                        bbox = tf.mapRect(QRectF(0, 0, src_w, src_h))
+                        rot_w, rot_h = bbox.width(), bbox.height()
+                    else:
+                        rot_w, rot_h = float(src_w), float(src_h)
+                    # 保持比例缩放，适配目标矩形
+                    k = min(draw_w / rot_w, draw_h / rot_h)
+                    scaled_w = max(1, int(round(rot_w * k)))
+                    scaled_h = max(1, int(round(rot_h * k)))
+                    # 若无自定义坐标，使用九宫格位置计算（以最终绘制尺寸为准）
+                    if not s.image_custom_pos:
+                        base_w = self._base_image.width if self._base_image else scaled_w
+                        base_h = self._base_image.height if self._base_image else scaled_h
+                        ix, iy = _compute_nine_grid_position((base_w, base_h), (scaled_w, scaled_h), s.image_position)
+                        px = self._preview_offset_x + round(ix * self._preview_scale_x)
+                        py = self._preview_offset_y + round(iy * self._preview_scale_y)
+                    # 设置不透明度并绘制（使用 painter 变换避免频繁生成新位图）
                     painter.setOpacity(max(0.0, min(1.0, s.image_alpha / 255.0)))
-                    # 根据用户的缩放百分比与渲染器计算得到的矩形宽高来绘制，确保尺寸一致
-                    scaled = self._drag_img_qpixmap_cache.scaled(draw_w, draw_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
-                    painter.drawPixmap(px, py, scaled)
+                    if s.image_rotation_deg and abs(s.image_rotation_deg) > 0.01:
+                        painter.save()
+                        painter.translate(px, py)
+                        painter.rotate(s.image_rotation_deg)
+                        painter.drawPixmap(QRectF(0, 0, scaled_w, scaled_h), self._drag_img_qpixmap_cache)
+                        painter.restore()
+                    else:
+                        painter.drawPixmap(QRectF(px, py, scaled_w, scaled_h), self._drag_img_qpixmap_cache)
         finally:
             painter.end()
         self.preview_label.setPixmap(pix)
@@ -1153,7 +1299,8 @@ class MainWindow(QMainWindow):
             "text_custom_pos": s.text_custom_pos,
             "image_position": s.image_position,
             "image_custom_pos": s.image_custom_pos,
-            "rotation_deg": s.rotation_deg,
+            "text_rotation_deg": s.text_rotation_deg,
+            "image_rotation_deg": s.image_rotation_deg,
             "output_format": s.output_format,
             "naming_rule": s.naming_rule,
             "prefix": s.prefix,
@@ -1183,7 +1330,14 @@ class MainWindow(QMainWindow):
         s.text_custom_pos = tuple(d.get("text_custom_pos")) if d.get("text_custom_pos") else (tuple(old_custom) if old_custom else s.text_custom_pos)
         s.image_position = d.get("image_position", old_pos if old_pos else s.image_position)
         s.image_custom_pos = tuple(d.get("image_custom_pos")) if d.get("image_custom_pos") else (tuple(old_custom) if old_custom else s.image_custom_pos)
-        s.rotation_deg = d.get("rotation_deg", s.rotation_deg)
+        # 旋转角度（兼容旧的全局 rotation_deg）
+        if ("text_rotation_deg" in d) or ("image_rotation_deg" in d):
+            s.text_rotation_deg = float(d.get("text_rotation_deg", s.text_rotation_deg))
+            s.image_rotation_deg = float(d.get("image_rotation_deg", s.image_rotation_deg))
+        else:
+            old_rot = float(d.get("rotation_deg", 0.0))
+            s.text_rotation_deg = old_rot
+            s.image_rotation_deg = old_rot
         s.output_format = d.get("output_format", s.output_format)
         s.naming_rule = d.get("naming_rule", s.naming_rule)
         s.prefix = d.get("prefix", s.prefix)
@@ -1202,11 +1356,15 @@ class MainWindow(QMainWindow):
         self.chk_stroke.setChecked(s.stroke_enabled)
         self.sp_stroke.setValue(s.stroke_width)
         self.pos_text_combo.setCurrentText(s.text_position)
+        if hasattr(self, 'sp_text_rotation'):
+            self.sp_text_rotation.setValue(int(s.text_rotation_deg))
         # 图片水印
         self.chk_img_enable.setChecked(s.image_enabled)
         self.sp_img_scale.setValue(s.image_scale_percent)
         self.slider_img_alpha.setValue(s.image_alpha)
         self.pos_img_combo.setCurrentText(s.image_position)
+        if hasattr(self, 'sp_img_rotation'):
+            self.sp_img_rotation.setValue(int(s.image_rotation_deg))
         # 导出设置
         self.cmb_format.setCurrentText(s.output_format)
         self.cmb_naming.setCurrentText(s.naming_rule)
@@ -1239,6 +1397,14 @@ class MainWindow(QMainWindow):
         self.lbl_quality.setVisible(is_jpeg)
         self.slider_quality.setVisible(is_jpeg)
 
+    # 更新输出目录标签显示
+    def _update_output_dir_label(self):
+        if getattr(self, 'output_dir', None):
+            self.lbl_out_dir.setText(f"输出目录：{self.output_dir}")
+            self.lbl_out_dir.setToolTip(self.output_dir)
+        else:
+            self.lbl_out_dir.setText("输出目录：未选择")
+
     # 删除文本水印内容并禁用
     def _delete_text(self):
         self.settings.text = ""
@@ -1264,11 +1430,6 @@ class MainWindow(QMainWindow):
         if not self.output_dir:
             QMessageBox.information(self, "提示", "请先选择输出目录")
             return
-        # 默认禁止导出到原目录：若任何图片的父目录与输出目录相同则警告
-        for p in self.image_paths:
-            if os.path.dirname(p) == self.output_dir:
-                QMessageBox.warning(self, "提示", "默认禁止导出到原目录，请选择不同的输出目录")
-                return
         fmt = self.settings.output_format
         ok = 0
         for src in self.image_paths:
