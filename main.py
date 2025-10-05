@@ -17,7 +17,7 @@ try:
         QMessageBox, QColorDialog
     )
     from PyQt6.QtGui import QImage, QPixmap, QIcon, QPainter, QFont, QColor, QPen, QPainterPath, QFontMetrics, QTransform
-    from PyQt6.QtCore import QSize, QPoint, Qt, QTimer, QRectF
+    from PyQt6.QtCore import QSize, QPoint, Qt, QTimer, QRectF, QRect
     PYQT_AVAILABLE = True
 except Exception:
     PYQT_AVAILABLE = False
@@ -210,154 +210,13 @@ def main():
     print("Processing completed!")
 
 
-@dataclass
-class WatermarkSettings:
-    # 文本水印
-    text_enabled: bool = True
-    text: str = "Sample Watermark"
-    font_size: int = 24
-    color: Tuple[int, int, int] = (255, 255, 255)  # RGB
-    text_alpha: int = 255  # 0-255
-    stroke_enabled: bool = False
-    stroke_color: Tuple[int, int, int] = (0, 0, 0)
-    stroke_width: int = 0
-
-    # 图片水印
-    image_enabled: bool = False
-    image_path: Optional[str] = None
-    image_scale_percent: int = 50  # 1-500
-    image_alpha: int = 255
-
-    # 布局
-    # 文本与图片分别的预设位置与自定义坐标
-    text_position: str = "bottom-right"
-    text_custom_pos: Optional[Tuple[int, int]] = None
-    image_position: str = "bottom-right"
-    image_custom_pos: Optional[Tuple[int, int]] = None
-    # 旋转角度分离：文本与图片各自控制
-    text_rotation_deg: float = 0.0
-    image_rotation_deg: float = 0.0
-
-    # 导出
-    output_format: str = "JPEG"  # JPEG 或 PNG
-    naming_rule: str = "suffix"  # original/prefix/suffix
-    prefix: str = "wm_"
-    suffix: str = "_watermarked"
-    jpeg_quality: int = 90  # 0-100
-    resize_percent: Optional[int] = None  # 按百分比缩放原图（可选）
+from watermark.settings import WatermarkSettings
 
 
-def _pil_to_qpixmap(img: Image.Image) -> QPixmap:
-    """PIL.Image 转为 QPixmap，用 RGBA 并显式 bytesPerLine，避免颜色错位与撕裂。"""
-    if img.mode != "RGBA":
-        img = img.convert("RGBA")
-    data = img.tobytes("raw", "RGBA")
-    bytes_per_line = img.width * 4
-    qimage = QImage(data, img.width, img.height, bytes_per_line, QImage.Format.Format_RGBA8888)
-    # 复制一份以与原始内存分离，避免临时缓冲释放导致显示异常
-    qimage = qimage.copy()
-    return QPixmap.fromImage(qimage)
+# 使用模块中的 _pil_to_qpixmap 实现
 
 
-class WatermarkRenderer:
-    """负责将文本/图片水印渲染到 PIL.Image 上。"""
-    def __init__(self):
-        pass
-
-    def render(self, image: Image.Image, settings: WatermarkSettings) -> Image.Image:
-        # 保证 RGB
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-
-        # 可选缩放原图
-        if settings.resize_percent and settings.resize_percent > 0:
-            scale = settings.resize_percent / 100.0
-            new_size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
-            image = image.resize(new_size, Image.Resampling.LANCZOS)
-
-        draw = ImageDraw.Draw(image)
-
-        # 清理上次记录
-        self.last_text_rect = None
-        self.last_image_rect = None
-
-        # 绘制文本水印
-        if settings.text_enabled and settings.text:
-            self._draw_text(draw, image, settings)
-
-        # 绘制图片水印
-        if settings.image_enabled and settings.image_path and os.path.exists(settings.image_path):
-            self._draw_image(image, settings)
-
-        return image
-
-    def _get_font(self, font_size: int) -> ImageFont.FreeTypeFont:
-        try:
-            return ImageFont.truetype("arial.ttf", font_size)
-        except:
-            try:
-                return ImageFont.truetype("C:/Windows/Fonts/simsun.ttc", font_size)
-            except:
-                return ImageFont.load_default()
-
-    def _resolve_position(self, image: Image.Image, content_size: Tuple[int, int], custom_pos: Optional[Tuple[int,int]], preset_position: str) -> Tuple[int, int]:
-        if custom_pos is not None:
-            x = max(0, min(image.width - content_size[0], custom_pos[0]))
-            y = max(0, min(image.height - content_size[1], custom_pos[1]))
-            return (x, y)
-        return _compute_nine_grid_position((image.width, image.height), content_size, preset_position)
-
-    def _draw_text(self, draw: ImageDraw.ImageDraw, image: Image.Image, settings: WatermarkSettings) -> None:
-        font = self._get_font(settings.font_size)
-        # 文本尺寸
-        bbox = draw.textbbox((0, 0), settings.text, font=font, stroke_width=settings.stroke_width if settings.stroke_enabled else 0)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-        # 颜色+透明度
-        r, g, b = settings.color
-        fill = (r, g, b, settings.text_alpha)
-        # 仅为文本创建最小透明层，避免旋转整个画布
-        txt_img = Image.new("RGBA", (max(1, text_w), max(1, text_h)), (255, 255, 255, 0))
-        txt_draw = ImageDraw.Draw(txt_img)
-        # 描边支持
-        stroke_w = settings.stroke_width if settings.stroke_enabled else 0
-        stroke_fill = (*settings.stroke_color, settings.text_alpha) if settings.stroke_enabled else None
-        txt_draw.text((0, 0), settings.text, fill=fill, font=font, stroke_width=stroke_w, stroke_fill=stroke_fill)
-        # 仅旋转文本层
-        if settings.text_rotation_deg and abs(settings.text_rotation_deg) > 0.01:
-            txt_img = txt_img.rotate(settings.text_rotation_deg, expand=True, resample=Image.Resampling.BICUBIC)
-        # 计算位置并叠加
-        x, y = self._resolve_position(image, (txt_img.width, txt_img.height), settings.text_custom_pos, settings.text_position)
-        image.paste(txt_img, (x, y), txt_img)
-        # 记录文本水印最后矩形（原图坐标）
-        self.last_text_rect = (x, y, txt_img.width, txt_img.height)
-
-    def _draw_image(self, image: Image.Image, settings: WatermarkSettings) -> None:
-        try:
-            wm = Image.open(settings.image_path)
-            # 保持透明通道
-            if wm.mode != "RGBA":
-                wm = wm.convert("RGBA")
-            # 按比例缩放
-            scale = max(1, settings.image_scale_percent) / 100.0
-            new_size = (max(1, int(wm.width * scale)), max(1, int(wm.height * scale)))
-            wm = wm.resize(new_size, Image.Resampling.LANCZOS)
-            # 应用整体透明度
-            if settings.image_alpha < 255:
-                alpha = wm.split()[3]
-                alpha = alpha.point(lambda p: int(p * (settings.image_alpha / 255.0)))
-                wm.putalpha(alpha)
-            # 仅旋转水印图片
-            if settings.image_rotation_deg and abs(settings.image_rotation_deg) > 0.01:
-                wm = wm.rotate(settings.image_rotation_deg, expand=True, resample=Image.Resampling.BICUBIC)
-            # 位置
-            x, y = self._resolve_position(image, (wm.width, wm.height), settings.image_custom_pos, settings.image_position)
-            # 叠加
-            image.paste(wm, (x, y), wm)
-            # 记录图片水印最后矩形（原图坐标）
-            self.last_image_rect = (x, y, wm.width, wm.height)
-        except Exception as e:
-            print(f"Error loading watermark image: {e}")
+# 使用模块中的 WatermarkRenderer 实现
 
 
 class MainWindow(QMainWindow):
@@ -1136,10 +995,10 @@ class MainWindow(QMainWindow):
                         painter.save()
                         painter.translate(px, py)
                         painter.rotate(s.image_rotation_deg)
-                        painter.drawPixmap(QRectF(0, 0, scaled_w, scaled_h), self._drag_img_qpixmap_cache)
+                        painter.drawPixmap(QRect(0, 0, scaled_w, scaled_h), self._drag_img_qpixmap_cache)
                         painter.restore()
                     else:
-                        painter.drawPixmap(QRectF(px, py, scaled_w, scaled_h), self._drag_img_qpixmap_cache)
+                        painter.drawPixmap(QRect(px, py, scaled_w, scaled_h), self._drag_img_qpixmap_cache)
         finally:
             painter.end()
         self.preview_label.setPixmap(pix)
@@ -1477,3 +1336,5 @@ def gui_main():
         pass
     win.show()
     sys.exit(app.exec())
+from watermark import _pil_to_qpixmap
+from watermark.renderer import WatermarkRenderer
