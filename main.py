@@ -243,11 +243,14 @@ class WatermarkSettings:
 
 
 def _pil_to_qpixmap(img: Image.Image) -> QPixmap:
-    """PIL.Image 转为 QPixmap 用于预览。"""
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    data = img.tobytes("raw", "RGB")
-    qimage = QImage(data, img.width, img.height, QImage.Format.Format_RGB888)
+    """PIL.Image 转为 QPixmap，用 RGBA 并显式 bytesPerLine，避免颜色错位与撕裂。"""
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    data = img.tobytes("raw", "RGBA")
+    bytes_per_line = img.width * 4
+    qimage = QImage(data, img.width, img.height, bytes_per_line, QImage.Format.Format_RGBA8888)
+    # 复制一份以与原始内存分离，避免临时缓冲释放导致显示异常
+    qimage = qimage.copy()
     return QPixmap.fromImage(qimage)
 
 
@@ -277,10 +280,6 @@ class WatermarkRenderer:
         if settings.image_enabled and settings.image_path and os.path.exists(settings.image_path):
             self._draw_image(image, settings)
 
-        # 旋转（整体渲染后再旋转）可选：此处为简单实现，避免锯齿可考虑更复杂算法
-        if settings.rotation_deg and abs(settings.rotation_deg) > 0.01:
-            image = image.rotate(settings.rotation_deg, expand=True, resample=Image.Resampling.BICUBIC)
-
         return image
 
     def _get_font(self, font_size: int) -> ImageFont.FreeTypeFont:
@@ -305,18 +304,22 @@ class WatermarkRenderer:
         bbox = draw.textbbox((0, 0), settings.text, font=font, stroke_width=settings.stroke_width if settings.stroke_enabled else 0)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
-        x, y = self._resolve_position(image, (text_w, text_h), settings)
         # 颜色+透明度
         r, g, b = settings.color
         fill = (r, g, b, settings.text_alpha)
-        # 创建透明层，避免直接在背景上叠加无法控制 alpha
-        txt_layer = Image.new("RGBA", image.size, (255, 255, 255, 0))
-        txt_draw = ImageDraw.Draw(txt_layer)
+        # 仅为文本创建最小透明层，避免旋转整个画布
+        txt_img = Image.new("RGBA", (max(1, text_w), max(1, text_h)), (255, 255, 255, 0))
+        txt_draw = ImageDraw.Draw(txt_img)
         # 描边支持
         stroke_w = settings.stroke_width if settings.stroke_enabled else 0
         stroke_fill = (*settings.stroke_color, settings.text_alpha) if settings.stroke_enabled else None
-        txt_draw.text((x, y), settings.text, fill=fill, font=font, stroke_width=stroke_w, stroke_fill=stroke_fill)
-        image.paste(txt_layer, (0, 0), txt_layer)
+        txt_draw.text((0, 0), settings.text, fill=fill, font=font, stroke_width=stroke_w, stroke_fill=stroke_fill)
+        # 仅旋转文本层
+        if settings.rotation_deg and abs(settings.rotation_deg) > 0.01:
+            txt_img = txt_img.rotate(settings.rotation_deg, expand=True, resample=Image.Resampling.BICUBIC)
+        # 计算位置并叠加
+        x, y = self._resolve_position(image, (txt_img.width, txt_img.height), settings)
+        image.paste(txt_img, (x, y), txt_img)
 
     def _draw_image(self, image: Image.Image, settings: WatermarkSettings) -> None:
         try:
@@ -333,6 +336,9 @@ class WatermarkRenderer:
                 alpha = wm.split()[3]
                 alpha = alpha.point(lambda p: int(p * (settings.image_alpha / 255.0)))
                 wm.putalpha(alpha)
+            # 仅旋转水印图片
+            if settings.rotation_deg and abs(settings.rotation_deg) > 0.01:
+                wm = wm.rotate(settings.rotation_deg, expand=True, resample=Image.Resampling.BICUBIC)
             # 位置
             x, y = self._resolve_position(image, (wm.width, wm.height), settings)
             # 叠加
